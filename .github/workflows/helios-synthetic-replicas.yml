@@ -1,0 +1,182 @@
+name: HELIOS synthetic replicas
+
+on:
+  workflow_dispatch:
+    inputs:
+      prepare_root:
+        description: Frozen PREPARE root
+        required: true
+        type: string
+      prepare_sha256:
+        description: Exact canonical PREPARE asset SHA-256
+        required: true
+        type: string
+      expected_commit:
+        description: Full commit SHA bound by PREPARE
+        required: true
+        type: string
+      challenge_round:
+        description: Previously committed future drand quicknet round
+        required: true
+        type: string
+      reveal_round:
+        description: Later drand quicknet round for synthetic labels
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+  TEMP: "${{ github.workspace }}/.audit-tmp"
+  TMP: "${{ github.workspace }}/.audit-tmp"
+  TMPDIR: "${{ github.workspace }}/.audit-tmp"
+
+jobs:
+  ubuntu-replica:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: "${{ inputs.expected_commit }}"
+          persist-credentials: false
+      - name: Run independent urllib replica
+        shell: bash
+        env:
+          HELIOS_PREPARE_ROOT: "${{ inputs.prepare_root }}"
+          HELIOS_PREPARE_SHA256: "${{ inputs.prepare_sha256 }}"
+          HELIOS_EXPECTED_COMMIT: "${{ inputs.expected_commit }}"
+          HELIOS_CHALLENGE_ROUND: "${{ inputs.challenge_round }}"
+          HELIOS_REVEAL_ROUND: "${{ inputs.reveal_round }}"
+        run: |
+          mkdir -p "$TEMP"
+          python3 -B -S ceremony/verify_prepare.py \
+            --prepare-root "$HELIOS_PREPARE_ROOT" \
+            --prepare-sha256 "$HELIOS_PREPARE_SHA256" \
+            --expected-commit "$HELIOS_EXPECTED_COMMIT" \
+            --executed-commit "$GITHUB_SHA" \
+            --challenge-round "$HELIOS_CHALLENGE_ROUND" \
+            --reveal-round "$HELIOS_REVEAL_ROUND" \
+            --output PREPARE_VERIFICATION.json
+          python3 -B -S ceremony/replica_ubuntu.py \
+            --prepare-root "$HELIOS_PREPARE_ROOT" \
+            --prepare-verification PREPARE_VERIFICATION.json \
+            --commit "$GITHUB_SHA" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --challenge-round "$HELIOS_CHALLENGE_ROUND" \
+            --output REPLICA_UBUNTU.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: helios-replica-ubuntu
+          path: REPLICA_UBUNTU.json
+          if-no-files-found: error
+          retention-days: 90
+
+  windows-replica:
+    runs-on: windows-2025
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: "${{ inputs.expected_commit }}"
+          persist-credentials: false
+      - name: Run independent HTTP client replica
+        shell: pwsh
+        env:
+          HELIOS_PREPARE_ROOT: "${{ inputs.prepare_root }}"
+          HELIOS_PREPARE_SHA256: "${{ inputs.prepare_sha256 }}"
+          HELIOS_EXPECTED_COMMIT: "${{ inputs.expected_commit }}"
+          HELIOS_CHALLENGE_ROUND: "${{ inputs.challenge_round }}"
+          HELIOS_REVEAL_ROUND: "${{ inputs.reveal_round }}"
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:TEMP | Out-Null
+          python -B -S ceremony/verify_prepare.py `
+            --prepare-root $env:HELIOS_PREPARE_ROOT `
+            --prepare-sha256 $env:HELIOS_PREPARE_SHA256 `
+            --expected-commit $env:HELIOS_EXPECTED_COMMIT `
+            --executed-commit $env:GITHUB_SHA `
+            --challenge-round $env:HELIOS_CHALLENGE_ROUND `
+            --reveal-round $env:HELIOS_REVEAL_ROUND `
+            --output PREPARE_VERIFICATION.json
+          python -B -S ceremony/replica_windows.py `
+            --prepare-root $env:HELIOS_PREPARE_ROOT `
+            --prepare-verification PREPARE_VERIFICATION.json `
+            --commit $env:GITHUB_SHA `
+            --run-id $env:GITHUB_RUN_ID `
+            --run-attempt $env:GITHUB_RUN_ATTEMPT `
+            --challenge-round $env:HELIOS_CHALLENGE_ROUND `
+            --output REPLICA_WINDOWS.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: helios-replica-windows
+          path: REPLICA_WINDOWS.json
+          if-no-files-found: error
+          retention-days: 90
+
+  pair-finalizer:
+    needs: [ubuntu-replica, windows-replica]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: "${{ inputs.expected_commit }}"
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: helios-replica-ubuntu
+          path: artifacts/ubuntu
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: helios-replica-windows
+          path: artifacts/windows
+      - name: Verify exact pair and construct candidate
+        shell: bash
+        env:
+          HELIOS_PREPARE_ROOT: "${{ inputs.prepare_root }}"
+          HELIOS_PREPARE_SHA256: "${{ inputs.prepare_sha256 }}"
+          HELIOS_EXPECTED_COMMIT: "${{ inputs.expected_commit }}"
+          HELIOS_CHALLENGE_ROUND: "${{ inputs.challenge_round }}"
+          HELIOS_REVEAL_ROUND: "${{ inputs.reveal_round }}"
+        run: |
+          mkdir -p "$TEMP"
+          python3 -B -S ceremony/verify_prepare.py \
+            --prepare-root "$HELIOS_PREPARE_ROOT" \
+            --prepare-sha256 "$HELIOS_PREPARE_SHA256" \
+            --expected-commit "$HELIOS_EXPECTED_COMMIT" \
+            --executed-commit "$GITHUB_SHA" \
+            --challenge-round "$HELIOS_CHALLENGE_ROUND" \
+            --reveal-round "$HELIOS_REVEAL_ROUND" \
+            --output PREPARE_VERIFICATION.json
+          PREPARE_VERIFICATION_SHA256="$(python3 -B -S -c 'import hashlib; print(hashlib.sha256(open("PREPARE_VERIFICATION.json", "rb").read()).hexdigest())')"
+          python3 -B -S ceremony/verify_pair.py \
+            --ubuntu artifacts/ubuntu/REPLICA_UBUNTU.json \
+            --windows artifacts/windows/REPLICA_WINDOWS.json \
+            --prepare-root "$HELIOS_PREPARE_ROOT" \
+            --prepare-verification-sha256 "$PREPARE_VERIFICATION_SHA256" \
+            --commit "$GITHUB_SHA" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --challenge-round "$HELIOS_CHALLENGE_ROUND" \
+            --output PAIR_VERIFICATION.json
+          python3 -B -S ceremony/make_finalize_candidate.py \
+            --ubuntu artifacts/ubuntu/REPLICA_UBUNTU.json \
+            --windows artifacts/windows/REPLICA_WINDOWS.json \
+            --pair PAIR_VERIFICATION.json \
+            --prepare-verification PREPARE_VERIFICATION.json \
+            --commit "$GITHUB_SHA" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --output FINALIZE_CANDIDATE.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: helios-finalize-candidate
+          path: |
+            FINALIZE_CANDIDATE.json
+            PAIR_VERIFICATION.json
+            PREPARE_VERIFICATION.json
+          if-no-files-found: error
+          retention-days: 90
