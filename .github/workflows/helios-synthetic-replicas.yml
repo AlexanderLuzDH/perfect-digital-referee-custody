@@ -1,0 +1,73 @@
+name: HELIOS synthetic replicas
+
+on:
+  workflow_dispatch:
+    inputs:
+      prepare_root:
+        description: Frozen PREPARE root
+        required: true
+        type: string
+      challenge_round:
+        description: Previously committed future drand quicknet round
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+  TEMP: "${{ github.workspace }}/.audit-tmp"
+  TMP: "${{ github.workspace }}/.audit-tmp"
+  TMPDIR: "${{ github.workspace }}/.audit-tmp"
+
+jobs:
+  ubuntu-replica:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Run independent urllib replica
+        shell: bash
+        env:
+          HELIOS_PREPARE_ROOT: "${{ inputs.prepare_root }}"
+          HELIOS_CHALLENGE_ROUND: "${{ inputs.challenge_round }}"
+        run: |
+          mkdir -p "$TEMP"
+          python3 -B -S ceremony/replica_ubuntu.py \
+            --prepare-root "$HELIOS_PREPARE_ROOT" \
+            --challenge-round "$HELIOS_CHALLENGE_ROUND" \
+            --output REPLICA_UBUNTU.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: helios-replica-ubuntu
+          path: REPLICA_UBUNTU.json
+          if-no-files-found: error
+          retention-days: 90
+
+  windows-replica:
+    runs-on: windows-2025
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Run independent HTTP client replica
+        shell: pwsh
+        env:
+          HELIOS_PREPARE_ROOT: "${{ inputs.prepare_root }}"
+          HELIOS_CHALLENGE_ROUND: "${{ inputs.challenge_round }}"
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:TEMP | Out-Null
+          python -B -S ceremony/replica_windows.py `
+            --prepare-root $env:HELIOS_PREPARE_ROOT `
+            --challenge-round $env:HELIOS_CHALLENGE_ROUND `
+            --output REPLICA_WINDOWS.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: helios-replica-windows
+          path: REPLICA_WINDOWS.json
+          if-no-files-found: error
+          retention-days: 90
