@@ -5,10 +5,13 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
+import os
 import re
 import urllib.parse
 import urllib.request
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -34,6 +37,15 @@ SIBLING_NAMES = (
     "REPLICA_UBUNTU.json",
     "REPLICA_WINDOWS.json",
 )
+ARTIFACT_ENTRIES = {
+    "helios-replica-ubuntu": ("REPLICA_UBUNTU.json",),
+    "helios-replica-windows": ("REPLICA_WINDOWS.json",),
+    "helios-finalize-candidate": (
+        "FINALIZE_CANDIDATE.json",
+        "PAIR_VERIFICATION.json",
+        "PREPARE_VERIFICATION.json",
+    ),
+}
 
 
 def canonical(value: Any) -> bytes:
@@ -64,14 +76,26 @@ def no_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return value
 
 
-def fetch_json(url: str, limit: int = 262144) -> tuple[Any, bytes]:
+def request_headers(accept: str, user_agent: str) -> dict[str, str]:
+    headers = {
+        "Accept": accept,
+        "User-Agent": user_agent,
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    token = os.environ.get("GITHUB_TOKEN")
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    return headers
+
+
+def fetch_bytes(
+    url: str,
+    limit: int,
+    accept: str = "application/octet-stream",
+) -> bytes:
     request = urllib.request.Request(
         url,
-        headers={
-            "Accept": "application/vnd.github+json",
-            "User-Agent": "helios-v5-finalize-verifier/1",
-            "X-GitHub-Api-Version": "2022-11-28",
-        },
+        headers=request_headers(accept, "helios-v5-finalize-verifier/1"),
     )
     with urllib.request.urlopen(request, timeout=20) as response:
         if response.status != 200:
@@ -79,7 +103,57 @@ def fetch_json(url: str, limit: int = 262144) -> tuple[Any, bytes]:
         raw = response.read(limit + 1)
     if len(raw) > limit:
         raise RuntimeError("HTTP oversize")
+    return raw
+
+
+def fetch_json(url: str, limit: int = 262144) -> tuple[Any, bytes]:
+    raw = fetch_bytes(url, limit, "application/vnd.github+json")
     return json.loads(raw.decode("utf-8"), object_pairs_hook=no_duplicates), raw
+
+
+def artifact_files(artifact: dict[str, Any]) -> dict[str, bytes]:
+    artifact_id = artifact["id"]
+    url = (
+        f"https://api.github.com/repos/{REPOSITORY}/actions/artifacts/"
+        f"{artifact_id}/zip"
+    )
+    archive_raw = fetch_bytes(url, 1048576)
+    digest = artifact.get("digest")
+    if (
+        type(digest) is not str
+        or digest != "sha256:" + hashlib.sha256(archive_raw).hexdigest()
+    ):
+        raise RuntimeError("artifact archive digest")
+    expected_names = ARTIFACT_ENTRIES[artifact["name"]]
+    result: dict[str, bytes] = {}
+    with zipfile.ZipFile(io.BytesIO(archive_raw), "r") as archive:
+        infos = archive.infolist()
+        names = [info.filename for info in infos]
+        if (
+            len(names) != len(set(names))
+            or tuple(sorted(names)) != tuple(sorted(expected_names))
+        ):
+            raise RuntimeError("artifact archive manifest")
+        for info in infos:
+            unix_type = (info.external_attr >> 16) & 0o170000
+            if (
+                info.is_dir()
+                or info.flag_bits & 0x1
+                or info.file_size > 65536
+                or info.compress_size > 1048576
+                or info.compress_type not in {
+                    zipfile.ZIP_STORED,
+                    zipfile.ZIP_DEFLATED,
+                }
+                or unix_type == 0o120000
+            ):
+                raise RuntimeError("unsafe artifact entry")
+            with archive.open(info, "r") as source:
+                raw = source.read(65537)
+            if len(raw) != info.file_size or len(raw) > 65536:
+                raise RuntimeError("artifact entry size")
+            result[info.filename] = raw
+    return result
 
 
 def parse_utc(value: str) -> int:
@@ -249,6 +323,34 @@ def main() -> int:
     jobs.sort(key=lambda item: JOB_NAMES.index(item["name"]))
     if jobs != body["jobs"] or [job["name"] for job in jobs] != list(JOB_NAMES):
         raise RuntimeError("job API mismatch")
+    expected_labels = {
+        "ubuntu-replica": "ubuntu-24.04",
+        "windows-replica": "windows-2025",
+        "pair-finalizer": "ubuntu-24.04",
+    }
+    if (
+        any(job["conclusion"] != "success" for job in jobs)
+        or len({job["id"] for job in jobs}) != 3
+        or any(
+            type(job["runner_name"]) is not str or not job["runner_name"]
+            for job in jobs
+        )
+        or len({job["runner_name"] for job in jobs}) != 3
+        or any(
+            type(job["runner_group_name"]) is not str
+            or not job["runner_group_name"]
+            for job in jobs
+        )
+        or any(
+            expected_labels[job["name"]] not in job["labels"]
+            for job in jobs
+        )
+        or any(
+            parse_utc(job["started_at"]) > parse_utc(job["completed_at"])
+            for job in jobs
+        )
+    ):
+        raise RuntimeError("job semantic mismatch")
     artifacts_response, _artifacts_raw = fetch_json(api_base + "/artifacts?per_page=100")
     artifacts = [
         selected_artifact(artifact)
@@ -259,6 +361,14 @@ def main() -> int:
     if (
         artifacts != body["workflow_artifacts"]
         or [artifact["name"] for artifact in artifacts] != list(ARTIFACT_NAMES)
+        or len({artifact["id"] for artifact in artifacts}) != 3
+        or any(artifact["expired"] is not False for artifact in artifacts)
+        or any(artifact["workflow_run_id"] != workflow["id"] for artifact in artifacts)
+        or any(
+            type(artifact["digest"]) is not str
+            or ROOT_RE.fullmatch(artifact["digest"].removeprefix("sha256:")) is None
+            for artifact in artifacts
+        )
     ):
         raise RuntimeError("artifact API mismatch")
     siblings = body["published_sibling_assets"]
@@ -275,6 +385,23 @@ def main() -> int:
             or asset.get("state") != "uploaded"
         ):
             raise RuntimeError("sibling asset mismatch")
+    published_bytes = {}
+    for name in SIBLING_NAMES:
+        raw = fetch_bytes(assets_by_name[name]["browser_download_url"], 65536)
+        if (
+            len(raw) != siblings[name]["size"]
+            or hashlib.sha256(raw).hexdigest() != siblings[name]["sha256"]
+        ):
+            raise RuntimeError("sibling bytes")
+        published_bytes[name] = raw
+    artifact_bytes = {}
+    for artifact in artifacts:
+        artifact_bytes.update(artifact_files(artifact))
+    if set(artifact_bytes) != set(SIBLING_NAMES):
+        raise RuntimeError("artifact entry union")
+    for name in SIBLING_NAMES:
+        if artifact_bytes[name] != published_bytes[name]:
+            raise RuntimeError("artifact release byte mismatch")
 
     published_unix = parse_utc(release["published_at"])
     reveal_unix = GENESIS_TIME + (arguments.reveal_round - 1) * PERIOD_SECONDS
@@ -294,6 +421,7 @@ def main() -> int:
         "schema": "janus.helios-v5.synthetic-finalize-verification.v1",
         "tag": tag,
         "workflow_artifacts_bound": len(artifacts),
+        "workflow_entries_byte_equal": len(artifact_bytes),
         "workflow_run_id": workflow["id"],
     }
     verification = {

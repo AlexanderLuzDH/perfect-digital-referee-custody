@@ -10,7 +10,13 @@ import re
 from pathlib import Path
 from typing import Any
 
-from verify_pair import canonical, framed_hash, read_receipt
+from verify_pair import (
+    PAIR_DOMAIN,
+    canonical,
+    check_receipt,
+    framed_hash,
+    read_receipt,
+)
 
 
 ROOT_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -55,6 +61,7 @@ def main() -> int:
     if (
         pair.get("schema") != "janus.helios-v5.synthetic-pair-verification.v1"
         or pair.get("verdict") != "PASS_EXACT_DUAL_REPLICA_AGREEMENT"
+        or pair.get("pair_root") != framed_hash(PAIR_DOMAIN, canonical(pair.get("pair")))
         or pair.get("prediction_root") != ubuntu.get("prediction_root")
         or ubuntu.get("predictions") != windows.get("predictions")
         or ubuntu.get("workflow") != {
@@ -75,6 +82,45 @@ def main() -> int:
         or not ROOT_RE.fullmatch(prepare.get("verification_root", ""))
     ):
         raise RuntimeError("binding mismatch")
+    check_receipt(
+        ubuntu,
+        prepare["prepare_root"],
+        ubuntu["challenge"]["round"],
+        "ubuntu-urllib-v1",
+        "linux",
+        arguments.commit,
+        arguments.run_id,
+        arguments.run_attempt,
+        "ubuntu-replica",
+        hashlib.sha256(prepare_raw).hexdigest(),
+    )
+    check_receipt(
+        windows,
+        prepare["prepare_root"],
+        windows["challenge"]["round"],
+        "windows-http-client-v1",
+        "windows",
+        arguments.commit,
+        arguments.run_id,
+        arguments.run_attempt,
+        "windows-replica",
+        hashlib.sha256(prepare_raw).hexdigest(),
+    )
+    expected_pair_body = {
+        "challenge": ubuntu["challenge"],
+        "prediction_root": ubuntu["prediction_root"],
+        "prepare_root": prepare["prepare_root"],
+        "prepare_verification_sha256": hashlib.sha256(prepare_raw).hexdigest(),
+        "ubuntu_receipt_sha256": hashlib.sha256(ubuntu_raw).hexdigest(),
+        "windows_receipt_sha256": hashlib.sha256(windows_raw).hexdigest(),
+        "workflow": {
+            "commit_sha1": arguments.commit,
+            "run_attempt": arguments.run_attempt,
+            "run_id": arguments.run_id,
+        },
+    }
+    if pair.get("pair") != expected_pair_body:
+        raise RuntimeError("pair body mismatch")
     body = {
         "challenge": ubuntu["challenge"],
         "commit_sha1": arguments.commit,

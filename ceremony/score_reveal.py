@@ -7,6 +7,8 @@ import argparse
 import hashlib
 import json
 import re
+import runpy
+import sys
 import time
 import urllib.request
 from pathlib import Path
@@ -115,7 +117,6 @@ def main() -> int:
     parser.add_argument("--ubuntu", required=True)
     parser.add_argument("--windows", required=True)
     parser.add_argument("--finalize", required=True)
-    parser.add_argument("--finalize-verification", required=True)
     parser.add_argument("--finalize-candidate", required=True)
     parser.add_argument("--pair", required=True)
     parser.add_argument("--prepare-verification", required=True)
@@ -126,9 +127,6 @@ def main() -> int:
         raise SystemExit("invalid output")
 
     finalize, finalize_raw = strict_json(Path(arguments.finalize), 65536)
-    verification, verification_raw = strict_json(
-        Path(arguments.finalize_verification), 8192
-    )
     candidate, candidate_raw = strict_json(
         Path(arguments.finalize_candidate), 16384
     )
@@ -138,21 +136,10 @@ def main() -> int:
     )
     finalize_body = dict(finalize)
     finalize_root = finalize_body.pop("finalize_root", None)
-    verification_body = dict(verification)
-    verification_root = verification_body.pop("verification_root", None)
     if (
         ROOT_RE.fullmatch(finalize_root or "") is None
         or finalize_root != framed_hash(FINALIZE_DOMAIN, canonical(finalize_body))
         or finalize.get("schema") != "janus.helios-v5.synthetic-finalize.v1"
-        or verification.get("schema")
-        != "janus.helios-v5.synthetic-finalize-verification.v1"
-        or verification.get("finalize_root") != finalize_root
-        or verification.get("finalize_sha256")
-        != hashlib.sha256(finalize_raw).hexdigest()
-        or verification.get("release_immutable") is not True
-        or verification_root != framed_hash(
-            FINALIZE_VERIFICATION_DOMAIN, canonical(verification_body)
-        )
     ):
         raise SystemExit("invalid finality")
     prepare = finalize["prepare"]
@@ -169,9 +156,53 @@ def main() -> int:
         or type(challenge_round) is not int
         or type(reveal_round) is not int
         or not 1 <= challenge_round < reveal_round <= 2**53 - 1
-        or verification.get("published_unix") >= prepare.get("reveal_scheduled_unix")
     ):
         raise SystemExit("invalid finality binding")
+
+    verifier_path = Path(__file__).resolve().with_name("verify_finalize.py")
+    verifier_argv = [
+        str(verifier_path),
+        "--finalize-root",
+        finalize_root,
+        "--finalize-sha256",
+        hashlib.sha256(finalize_raw).hexdigest(),
+        "--prepare-root",
+        prepare_root,
+        "--commit",
+        commit_sha1,
+        "--reveal-round",
+        str(reveal_round),
+        "--output",
+        "FINALIZE_VERIFICATION.json",
+    ]
+    prior_argv = sys.argv
+    try:
+        sys.argv = verifier_argv
+        try:
+            runpy.run_path(str(verifier_path), run_name="__main__")
+        except SystemExit as exc:
+            if exc.code not in (None, 0):
+                raise RuntimeError("live finalize verification failed") from exc
+    finally:
+        sys.argv = prior_argv
+    verification, verification_raw = strict_json(
+        Path("FINALIZE_VERIFICATION.json"), 8192
+    )
+    verification_body = dict(verification)
+    verification_root = verification_body.pop("verification_root", None)
+    if (
+        verification.get("schema")
+        != "janus.helios-v5.synthetic-finalize-verification.v1"
+        or verification.get("finalize_root") != finalize_root
+        or verification.get("finalize_sha256")
+        != hashlib.sha256(finalize_raw).hexdigest()
+        or verification.get("release_immutable") is not True
+        or verification.get("published_unix") >= prepare.get("reveal_scheduled_unix")
+        or verification_root != framed_hash(
+            FINALIZE_VERIFICATION_DOMAIN, canonical(verification_body)
+        )
+    ):
+        raise SystemExit("invalid live finality")
 
     ubuntu, ubuntu_raw = read_receipt(Path(arguments.ubuntu))
     windows, windows_raw = read_receipt(Path(arguments.windows))

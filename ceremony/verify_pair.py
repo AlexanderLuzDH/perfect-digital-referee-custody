@@ -231,6 +231,7 @@ def main() -> int:
         },
     }
     result = {
+        "pair": pair,
         "pair_root": framed_hash(PAIR_DOMAIN, canonical(pair)),
         "prediction_root": ubuntu["prediction_root"],
         "schema": "janus.helios-v5.synthetic-pair-verification.v1",

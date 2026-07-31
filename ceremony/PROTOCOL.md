@@ -25,11 +25,15 @@ IDs and no target, checkpoint, archive, model, or real labels.
    controller then queries GitHub's run, job, runner-label, and artifact APIs,
    constructs `FINALIZE.json`, and publishes the exact receipts and verifier
    files with it as an immutable release before the reveal round.
-5. Before scoring, `verify_finalize.py` downloads the immutable FINALIZE asset,
-   recomputes its root, checks every sibling asset digest, re-queries the
-   workflow, job, runner, and artifact identities, and denies publication at or
-   after the scheduled reveal round. The reveal round then creates labels
-   without a preexisting secret: each subject
+5. Before scoring, `score_reveal.py` directly executes the live
+   `verify_finalize.py`; it does not accept a caller-created verification
+   receipt. The verifier downloads the immutable FINALIZE asset, recomputes its
+   root, checks every sibling asset digest, re-queries the workflow, job,
+   runner, and artifact identities, downloads each artifact archive by ID,
+   validates an exact safe archive manifest and archive digest, and compares
+   every contained file byte-for-byte with the immutable release assets. It
+   denies publication at or after the scheduled reveal round. The reveal round
+   then creates labels without a preexisting secret: each subject
    receives a rank hash over the reveal randomness and subject ID. Exactly the
    four lexicographically smallest `(rank hash, subject ID)` pairs receive label
    one; the other four receive label zero.
