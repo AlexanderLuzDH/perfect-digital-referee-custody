@@ -9,6 +9,7 @@ import io
 import json
 import os
 import re
+import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
@@ -113,13 +114,64 @@ def fetch_json(url: str, limit: int = 262144) -> tuple[Any, bytes]:
     return json.loads(raw.decode("utf-8"), object_pairs_hook=no_duplicates), raw
 
 
-def artifact_files(artifact: dict[str, Any]) -> dict[str, bytes]:
-    artifact_id = artifact["id"]
-    url = (
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+
+def fetch_artifact_archive(artifact_id: int) -> bytes:
+    token = os.environ.get("GITHUB_TOKEN", "").strip()
+    if not token:
+        raise RuntimeError("artifact authorization unavailable")
+    api_url = (
         f"https://api.github.com/repos/{REPOSITORY}/actions/artifacts/"
         f"{artifact_id}/zip"
     )
-    archive_raw = fetch_bytes(url, 1048576)
+    request = urllib.request.Request(
+        api_url,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "Authorization": "Bearer " + token,
+            "User-Agent": "helios-v5-artifact-verifier/1",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
+    try:
+        urllib.request.build_opener(NoRedirect).open(request, timeout=20)
+    except urllib.error.HTTPError as exc:
+        if exc.code != 302:
+            raise
+        location = exc.headers.get("Location")
+    else:
+        raise RuntimeError("artifact redirect missing")
+    if type(location) is not str:
+        raise RuntimeError("artifact location missing")
+    parsed = urllib.parse.urlsplit(location)
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname is None
+        or not parsed.hostname.endswith(".blob.core.windows.net")
+        or not parsed.path.startswith("/actions-results/")
+        or not parsed.query
+        or parsed.fragment
+    ):
+        raise RuntimeError("artifact redirect boundary")
+    clean_request = urllib.request.Request(
+        location,
+        headers={"User-Agent": "helios-v5-artifact-verifier/1"},
+    )
+    with urllib.request.urlopen(clean_request, timeout=20) as response:
+        if response.status != 200:
+            raise RuntimeError("artifact storage status")
+        raw = response.read(1048577)
+    if len(raw) > 1048576:
+        raise RuntimeError("artifact archive oversize")
+    return raw
+
+
+def artifact_files(artifact: dict[str, Any]) -> dict[str, bytes]:
+    artifact_id = artifact["id"]
+    archive_raw = fetch_artifact_archive(artifact_id)
     digest = artifact.get("digest")
     if (
         type(digest) is not str
