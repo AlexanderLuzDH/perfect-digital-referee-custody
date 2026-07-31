@@ -14,6 +14,7 @@ from typing import Any
 CHAIN_HASH = "52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971"
 SUBJECTS = tuple(f"subject-{index:02d}" for index in range(8))
 ROOT_RE = re.compile(r"^[0-9a-f]{64}$")
+COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 PREDICTION_DOMAIN = b"JANUS-HELIOS-V5-SYNTHETIC-PREDICTION\0"
 PREDICTION_ROOT_DOMAIN = b"JANUS-HELIOS-V5-SYNTHETIC-PREDICTION-ROOT\0"
 RECEIPT_DOMAIN = b"JANUS-HELIOS-V5-SYNTHETIC-REPLICA-RECEIPT\0"
@@ -64,6 +65,11 @@ def check_receipt(
     challenge_round: int,
     implementation: str,
     os_family: str,
+    commit_sha1: str,
+    run_id: str,
+    run_attempt: int,
+    job: str,
+    prepare_verification_sha256: str,
 ) -> None:
     if set(value) != {
         "challenge",
@@ -72,9 +78,11 @@ def check_receipt(
         "prediction_root",
         "predictions",
         "prepare_root",
+        "prepare_verification_sha256",
         "receipt_root",
         "relay_observations",
         "schema",
+        "workflow",
     }:
         raise ValueError("receipt shape")
     if value["schema"] != "janus.helios-v5.synthetic-replica-receipt.v1":
@@ -83,6 +91,15 @@ def check_receipt(
         raise ValueError("replica identity")
     if value["prepare_root"] != prepare_root:
         raise ValueError("prepare binding")
+    if value["prepare_verification_sha256"] != prepare_verification_sha256:
+        raise ValueError("prepare verification binding")
+    if value["workflow"] != {
+        "commit_sha1": commit_sha1,
+        "job": job,
+        "run_attempt": run_attempt,
+        "run_id": run_id,
+    }:
+        raise ValueError("workflow binding")
     challenge = value["challenge"]
     if (
         type(challenge) is not dict
@@ -111,6 +128,12 @@ def check_receipt(
             }
             or observation["base"] in bases
             or observation["round"] != challenge_round
+            or type(observation["randomness"]) is not str
+            or ROOT_RE.fullmatch(observation["randomness"]) is None
+            or type(observation["signature"]) is not str
+            or re.fullmatch(r"[0-9a-f]{96}", observation["signature"]) is None
+            or hashlib.sha256(bytes.fromhex(observation["signature"])).hexdigest()
+            != observation["randomness"]
         ):
             raise ValueError("observation")
         bases.add(observation["base"])
@@ -150,10 +173,20 @@ def main() -> int:
     parser.add_argument("--ubuntu", required=True)
     parser.add_argument("--windows", required=True)
     parser.add_argument("--prepare-root", required=True)
+    parser.add_argument("--prepare-verification-sha256", required=True)
+    parser.add_argument("--commit", required=True)
+    parser.add_argument("--run-id", required=True)
+    parser.add_argument("--run-attempt", required=True, type=int)
     parser.add_argument("--challenge-round", required=True, type=int)
     arguments = parser.parse_args()
-    if ROOT_RE.fullmatch(arguments.prepare_root) is None:
-        raise SystemExit("invalid prepare root")
+    if (
+        ROOT_RE.fullmatch(arguments.prepare_root) is None
+        or ROOT_RE.fullmatch(arguments.prepare_verification_sha256) is None
+        or COMMIT_RE.fullmatch(arguments.commit) is None
+        or re.fullmatch(r"[1-9][0-9]{0,19}", arguments.run_id) is None
+        or not 1 <= arguments.run_attempt <= 1000
+    ):
+        raise SystemExit("invalid identity")
     ubuntu, ubuntu_raw = read_receipt(Path(arguments.ubuntu))
     windows, windows_raw = read_receipt(Path(arguments.windows))
     check_receipt(
@@ -162,6 +195,11 @@ def main() -> int:
         arguments.challenge_round,
         "ubuntu-urllib-v1",
         "linux",
+        arguments.commit,
+        arguments.run_id,
+        arguments.run_attempt,
+        "ubuntu-replica",
+        arguments.prepare_verification_sha256,
     )
     check_receipt(
         windows,
@@ -169,6 +207,11 @@ def main() -> int:
         arguments.challenge_round,
         "windows-http-client-v1",
         "windows",
+        arguments.commit,
+        arguments.run_id,
+        arguments.run_attempt,
+        "windows-replica",
+        arguments.prepare_verification_sha256,
     )
     if ubuntu["challenge"] != windows["challenge"]:
         raise ValueError("challenge disagreement")
@@ -178,8 +221,14 @@ def main() -> int:
         "challenge": ubuntu["challenge"],
         "prediction_root": ubuntu["prediction_root"],
         "prepare_root": arguments.prepare_root,
+        "prepare_verification_sha256": arguments.prepare_verification_sha256,
         "ubuntu_receipt_sha256": hashlib.sha256(ubuntu_raw).hexdigest(),
         "windows_receipt_sha256": hashlib.sha256(windows_raw).hexdigest(),
+        "workflow": {
+            "commit_sha1": arguments.commit,
+            "run_attempt": arguments.run_attempt,
+            "run_id": arguments.run_id,
+        },
     }
     result = {
         "pair_root": framed_hash(PAIR_DOMAIN, canonical(pair)),

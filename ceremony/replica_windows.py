@@ -16,6 +16,10 @@ CHAIN = "52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971"
 HOSTS = ("api.drand.sh", "api2.drand.sh", "api3.drand.sh")
 HEX64 = re.compile("[0-9a-f]{64}")
 HEX96 = re.compile("[0-9a-f]{96}")
+HEX40 = re.compile("[0-9a-f]{40}")
+PREPARE_VERIFICATION_DOMAIN = (
+    b"JANUS-HELIOS-V5-SYNTHETIC-PREPARE-VERIFICATION\0"
+)
 
 
 def encode_json(value):
@@ -88,7 +92,14 @@ def obtain(requested_round):
     raise RuntimeError("no unique relay quorum")
 
 
-def construct(preparation, requested_round):
+def construct(
+    preparation,
+    requested_round,
+    prepare_verification_sha256,
+    commit_sha1,
+    run_id,
+    run_attempt,
+):
     random_text, signature_text, observations = obtain(requested_round)
     predictions = []
     for number in range(8):
@@ -117,8 +128,15 @@ def construct(preparation, requested_round):
         "prediction_root": prediction_root,
         "predictions": predictions,
         "prepare_root": preparation,
+        "prepare_verification_sha256": prepare_verification_sha256,
         "relay_observations": observations,
         "schema": "janus.helios-v5.synthetic-replica-receipt.v1",
+        "workflow": {
+            "commit_sha1": commit_sha1,
+            "job": "windows-replica",
+            "run_attempt": run_attempt,
+            "run_id": run_id,
+        },
     }
     unsigned["receipt_root"] = framed(
         b"JANUS-HELIOS-V5-SYNTHETIC-REPLICA-RECEIPT\0", [encode_json(unsigned)]
@@ -129,18 +147,56 @@ def construct(preparation, requested_round):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--prepare-root", required=True)
+    parser.add_argument("--prepare-verification", required=True)
+    parser.add_argument("--commit", required=True)
+    parser.add_argument("--run-id", required=True)
+    parser.add_argument("--run-attempt", required=True, type=int)
     parser.add_argument("--challenge-round", type=int, required=True)
     parser.add_argument("--output", required=True)
     options = parser.parse_args()
-    if HEX64.fullmatch(options.prepare_root) is None:
-        raise SystemExit("invalid prepare root")
+    if (
+        HEX64.fullmatch(options.prepare_root) is None
+        or HEX40.fullmatch(options.commit) is None
+        or re.fullmatch(r"[1-9][0-9]{0,19}", options.run_id) is None
+        or not 1 <= options.run_attempt <= 1000
+    ):
+        raise SystemExit("invalid identity")
     if not 1 <= options.challenge_round <= 2**53 - 1:
         raise SystemExit("invalid challenge round")
     destination = Path(options.output)
     if destination.parent != Path(".") or destination.name != "REPLICA_WINDOWS.json":
         raise SystemExit("invalid output")
+    verification_path = Path(options.prepare_verification)
+    if (
+        verification_path.parent != Path(".")
+        or verification_path.name != "PREPARE_VERIFICATION.json"
+        or not verification_path.is_file()
+        or verification_path.is_symlink()
+        or verification_path.stat().st_size > 8192
+    ):
+        raise SystemExit("invalid prepare verification")
+    verification_raw = verification_path.read_bytes()
+    verification = json.loads(verification_raw.decode("ascii"))
+    verification_body = dict(verification) if isinstance(verification, dict) else {}
+    verification_root = verification_body.pop("verification_root", None)
+    if (
+        not isinstance(verification, dict)
+        or verification_raw != encode_json(verification) + b"\n"
+        or verification.get("prepare_root") != options.prepare_root
+        or verification.get("commit_sha1") != options.commit
+        or verification.get("release_immutable") is not True
+        or verification_root != framed(
+            PREPARE_VERIFICATION_DOMAIN, [encode_json(verification_body)]
+        )
+    ):
+        raise SystemExit("invalid prepare verification")
     destination.write_bytes(encode_json(construct(
-        options.prepare_root, options.challenge_round
+        options.prepare_root,
+        options.challenge_round,
+        hashlib.sha256(verification_raw).hexdigest(),
+        options.commit,
+        options.run_id,
+        options.run_attempt,
     )) + b"\n")
     return 0
 

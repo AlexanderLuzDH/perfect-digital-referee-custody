@@ -21,9 +21,13 @@ RELAYS = (
 )
 SUBJECTS = tuple(f"subject-{index:02d}" for index in range(8))
 ROOT_RE = re.compile(r"^[0-9a-f]{64}$")
+COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 PREDICTION_DOMAIN = b"JANUS-HELIOS-V5-SYNTHETIC-PREDICTION\0"
 PREDICTION_ROOT_DOMAIN = b"JANUS-HELIOS-V5-SYNTHETIC-PREDICTION-ROOT\0"
 RECEIPT_DOMAIN = b"JANUS-HELIOS-V5-SYNTHETIC-REPLICA-RECEIPT\0"
+PREPARE_VERIFICATION_DOMAIN = (
+    b"JANUS-HELIOS-V5-SYNTHETIC-PREPARE-VERIFICATION\0"
+)
 
 
 def canonical(value: Any) -> bytes:
@@ -100,7 +104,14 @@ def fetch_quorum(round_number: int) -> tuple[str, str, list[dict[str, Any]]]:
     raise RuntimeError("relay quorum")
 
 
-def build_receipt(prepare_root: str, round_number: int) -> dict[str, Any]:
+def build_receipt(
+    prepare_root: str,
+    round_number: int,
+    prepare_verification_sha256: str,
+    commit_sha1: str,
+    run_id: str,
+    run_attempt: int,
+) -> dict[str, Any]:
     randomness, signature, observations = fetch_quorum(round_number)
     predictions = []
     for subject in SUBJECTS:
@@ -124,8 +135,15 @@ def build_receipt(prepare_root: str, round_number: int) -> dict[str, Any]:
         "prediction_root": prediction_root,
         "predictions": predictions,
         "prepare_root": prepare_root,
+        "prepare_verification_sha256": prepare_verification_sha256,
         "relay_observations": observations,
         "schema": "janus.helios-v5.synthetic-replica-receipt.v1",
+        "workflow": {
+            "commit_sha1": commit_sha1,
+            "job": "ubuntu-replica",
+            "run_attempt": run_attempt,
+            "run_id": run_id,
+        },
     }
     return {**body, "receipt_root": framed_hash(RECEIPT_DOMAIN, canonical(body))}
 
@@ -133,17 +151,57 @@ def build_receipt(prepare_root: str, round_number: int) -> dict[str, Any]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--prepare-root", required=True)
+    parser.add_argument("--prepare-verification", required=True)
+    parser.add_argument("--commit", required=True)
+    parser.add_argument("--run-id", required=True)
+    parser.add_argument("--run-attempt", required=True, type=int)
     parser.add_argument("--challenge-round", required=True, type=int)
     parser.add_argument("--output", required=True)
     arguments = parser.parse_args()
-    if ROOT_RE.fullmatch(arguments.prepare_root) is None:
-        raise SystemExit("invalid prepare root")
+    if (
+        ROOT_RE.fullmatch(arguments.prepare_root) is None
+        or COMMIT_RE.fullmatch(arguments.commit) is None
+        or re.fullmatch(r"[1-9][0-9]{0,19}", arguments.run_id) is None
+        or not 1 <= arguments.run_attempt <= 1000
+    ):
+        raise SystemExit("invalid identity")
     if arguments.challenge_round < 1 or arguments.challenge_round > 2**53 - 1:
         raise SystemExit("invalid challenge round")
     output = Path(arguments.output)
     if output.name != "REPLICA_UBUNTU.json" or output.parent != Path("."):
         raise SystemExit("invalid output")
-    raw = canonical(build_receipt(arguments.prepare_root, arguments.challenge_round)) + b"\n"
+    verification_path = Path(arguments.prepare_verification)
+    if (
+        verification_path.parent != Path(".")
+        or verification_path.name != "PREPARE_VERIFICATION.json"
+        or not verification_path.is_file()
+        or verification_path.is_symlink()
+        or verification_path.stat().st_size > 8192
+    ):
+        raise SystemExit("invalid prepare verification")
+    verification_raw = verification_path.read_bytes()
+    verification = json.loads(verification_raw.decode("ascii"))
+    verification_body = dict(verification) if type(verification) is dict else {}
+    verification_root = verification_body.pop("verification_root", None)
+    if (
+        type(verification) is not dict
+        or verification_raw != canonical(verification) + b"\n"
+        or verification.get("prepare_root") != arguments.prepare_root
+        or verification.get("commit_sha1") != arguments.commit
+        or verification.get("release_immutable") is not True
+        or verification_root != framed_hash(
+            PREPARE_VERIFICATION_DOMAIN, canonical(verification_body)
+        )
+    ):
+        raise SystemExit("invalid prepare verification")
+    raw = canonical(build_receipt(
+        arguments.prepare_root,
+        arguments.challenge_round,
+        hashlib.sha256(verification_raw).hexdigest(),
+        arguments.commit,
+        arguments.run_id,
+        arguments.run_attempt,
+    )) + b"\n"
     output.write_bytes(raw)
     return 0
 

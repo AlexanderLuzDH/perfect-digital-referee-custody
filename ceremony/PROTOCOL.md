@@ -10,15 +10,26 @@ IDs and no target, checkpoint, archive, model, or real labels.
    challenge round, one later reveal round, all hash domains, and a fixed
    success threshold.
 2. PREPARE is published as an immutable GitHub release before the challenge
-   round.
+   round. Every hosted job downloads that exact asset, recomputes its root,
+   checks release immutability and publication time, verifies all bound source
+   hashes, checks out the exact bound commit, and denies a late or mismatched
+   preparation.
 3. After the challenge round, separately implemented Linux/`urllib` and
    Windows/`http.client` workers fetch the exact round from three HTTPS relays,
    require at least two identical responses, verify
    `randomness = SHA-256(signature)`, and independently calculate all eight
    predictions.
-4. The exact receipts, workflow run and job identities, and agreement root are
-   published as immutable `FINALIZE.json` before the reveal round.
-5. The reveal round creates labels without a preexisting secret: each subject
+4. A third hosted job downloads the exact two workflow artifacts, reruns the
+   pair checker, and constructs a candidate binding the run ID, attempt, commit,
+   receipt hashes, pair root, and preparation receipt. A separate local
+   controller then queries GitHub's run, job, runner-label, and artifact APIs,
+   constructs `FINALIZE.json`, and publishes the exact receipts and verifier
+   files with it as an immutable release before the reveal round.
+5. Before scoring, `verify_finalize.py` downloads the immutable FINALIZE asset,
+   recomputes its root, checks every sibling asset digest, re-queries the
+   workflow, job, runner, and artifact identities, and denies publication at or
+   after the scheduled reveal round. The reveal round then creates labels
+   without a preexisting secret: each subject
    receives a rank hash over the reveal randomness and subject ID. Exactly the
    four lexicographically smallest `(rank hash, subject ID)` pairs receive label
    one; the other four receive label zero.
@@ -30,13 +41,15 @@ IDs and no target, checkpoint, archive, model, or real labels.
 
 ## Authority boundaries
 
-This is real chronology and real host/OS/implementation diversity for a
-synthetic relation. GitHub hosts the repository, immutable releases, both
-ephemeral runners, workflow logs, and artifacts, so it remains one provider and
-one repository-administrator domain. The drand relays provide future entropy,
-but these standard-library workers do not implement BLS verification; they
-retain TLS/relay-quorum trust. Public release attestations retain GitHub,
-Fulcio, and timestamp-authority trust.
+Only a completed transcript that passes the external release-time and
+workflow/job API checks is evidence of chronology or host/OS/implementation
+diversity. Source fields and unkeyed receipt hashes alone grant no such
+authority. GitHub hosts the repository, immutable releases, both ephemeral
+runners, workflow logs, and artifacts, so even a passing transcript remains one
+provider and one repository-administrator domain. The drand relays provide
+future entropy, but these standard-library workers do not implement BLS
+verification; they retain TLS/relay-quorum trust. Public release attestations
+retain GitHub, Fulcio, and timestamp-authority trust.
 
 No result from this ceremony grants target, extraction, deserialization, model,
 real-label, backdoor, benignness, production, or scientific authority.

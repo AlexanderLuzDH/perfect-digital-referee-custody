@@ -31,6 +31,26 @@ RELAYS = (
 LABEL_RANK_DOMAIN = b"JANUS-HELIOS-V5-SYNTHETIC-LABEL-RANK\0"
 LABEL_ROOT_DOMAIN = b"JANUS-HELIOS-V5-SYNTHETIC-LABEL-ROOT\0"
 REVEAL_DOMAIN = b"JANUS-HELIOS-V5-SYNTHETIC-REVEAL\0"
+FINALIZE_DOMAIN = b"JANUS-HELIOS-V5-SYNTHETIC-FINALIZE\0"
+FINALIZE_VERIFICATION_DOMAIN = (
+    b"JANUS-HELIOS-V5-SYNTHETIC-FINALIZE-VERIFICATION\0"
+)
+FINALIZE_CANDIDATE_DOMAIN = (
+    b"JANUS-HELIOS-V5-SYNTHETIC-FINALIZE-CANDIDATE\0"
+)
+PREPARE_VERIFICATION_DOMAIN = (
+    b"JANUS-HELIOS-V5-SYNTHETIC-PREPARE-VERIFICATION\0"
+)
+
+
+def strict_json(path: Path, limit: int) -> tuple[dict[str, Any], bytes]:
+    if not path.is_file() or path.is_symlink() or path.stat().st_size > limit:
+        raise ValueError("bad JSON file")
+    raw = path.read_bytes()
+    value = json.loads(raw.decode("ascii"))
+    if type(value) is not dict or raw != canonical(value) + b"\n":
+        raise ValueError("non-canonical JSON")
+    return value, raw
 
 
 def fetch_one(base: str, round_number: int) -> dict[str, Any]:
@@ -94,45 +114,170 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--ubuntu", required=True)
     parser.add_argument("--windows", required=True)
-    parser.add_argument("--prepare-root", required=True)
-    parser.add_argument("--finalize-root", required=True)
-    parser.add_argument("--challenge-round", required=True, type=int)
-    parser.add_argument("--reveal-round", required=True, type=int)
+    parser.add_argument("--finalize", required=True)
+    parser.add_argument("--finalize-verification", required=True)
+    parser.add_argument("--finalize-candidate", required=True)
+    parser.add_argument("--pair", required=True)
+    parser.add_argument("--prepare-verification", required=True)
     parser.add_argument("--output", required=True)
     arguments = parser.parse_args()
-    if (
-        ROOT_RE.fullmatch(arguments.prepare_root) is None
-        or ROOT_RE.fullmatch(arguments.finalize_root) is None
-        or not 1 <= arguments.challenge_round < arguments.reveal_round <= 2**53 - 1
-    ):
-        raise SystemExit("invalid binding")
     destination = Path(arguments.output)
     if destination.parent != Path(".") or destination.name != "REVEAL.json":
         raise SystemExit("invalid output")
 
-    ubuntu, _ubuntu_raw = read_receipt(Path(arguments.ubuntu))
-    windows, _windows_raw = read_receipt(Path(arguments.windows))
+    finalize, finalize_raw = strict_json(Path(arguments.finalize), 65536)
+    verification, verification_raw = strict_json(
+        Path(arguments.finalize_verification), 8192
+    )
+    candidate, candidate_raw = strict_json(
+        Path(arguments.finalize_candidate), 16384
+    )
+    pair, pair_raw = strict_json(Path(arguments.pair), 4096)
+    prepare_verification, prepare_verification_raw = strict_json(
+        Path(arguments.prepare_verification), 8192
+    )
+    finalize_body = dict(finalize)
+    finalize_root = finalize_body.pop("finalize_root", None)
+    verification_body = dict(verification)
+    verification_root = verification_body.pop("verification_root", None)
+    if (
+        ROOT_RE.fullmatch(finalize_root or "") is None
+        or finalize_root != framed_hash(FINALIZE_DOMAIN, canonical(finalize_body))
+        or finalize.get("schema") != "janus.helios-v5.synthetic-finalize.v1"
+        or verification.get("schema")
+        != "janus.helios-v5.synthetic-finalize-verification.v1"
+        or verification.get("finalize_root") != finalize_root
+        or verification.get("finalize_sha256")
+        != hashlib.sha256(finalize_raw).hexdigest()
+        or verification.get("release_immutable") is not True
+        or verification_root != framed_hash(
+            FINALIZE_VERIFICATION_DOMAIN, canonical(verification_body)
+        )
+    ):
+        raise SystemExit("invalid finality")
+    prepare = finalize["prepare"]
+    workflow = finalize["workflow"]
+    prepare_root = prepare.get("root")
+    prepare_verification_sha256 = prepare.get("verification_sha256")
+    challenge_round = finalize.get("challenge", {}).get("round")
+    reveal_round = prepare.get("reveal_round")
+    commit_sha1 = finalize.get("commit_sha1")
+    if (
+        ROOT_RE.fullmatch(prepare_root or "") is None
+        or ROOT_RE.fullmatch(prepare_verification_sha256 or "") is None
+        or re.fullmatch(r"[0-9a-f]{40}", commit_sha1 or "") is None
+        or type(challenge_round) is not int
+        or type(reveal_round) is not int
+        or not 1 <= challenge_round < reveal_round <= 2**53 - 1
+        or verification.get("published_unix") >= prepare.get("reveal_scheduled_unix")
+    ):
+        raise SystemExit("invalid finality binding")
+
+    ubuntu, ubuntu_raw = read_receipt(Path(arguments.ubuntu))
+    windows, windows_raw = read_receipt(Path(arguments.windows))
+    siblings = finalize.get("published_sibling_assets", {})
+    if (
+        siblings.get("REPLICA_UBUNTU.json") != {
+            "sha256": hashlib.sha256(ubuntu_raw).hexdigest(),
+            "size": len(ubuntu_raw),
+        }
+        or siblings.get("REPLICA_WINDOWS.json") != {
+            "sha256": hashlib.sha256(windows_raw).hexdigest(),
+            "size": len(windows_raw),
+        }
+        or siblings.get("FINALIZE_CANDIDATE.json") != {
+            "sha256": hashlib.sha256(candidate_raw).hexdigest(),
+            "size": len(candidate_raw),
+        }
+        or siblings.get("PAIR_VERIFICATION.json") != {
+            "sha256": hashlib.sha256(pair_raw).hexdigest(),
+            "size": len(pair_raw),
+        }
+        or siblings.get("PREPARE_VERIFICATION.json") != {
+            "sha256": hashlib.sha256(prepare_verification_raw).hexdigest(),
+            "size": len(prepare_verification_raw),
+        }
+    ):
+        raise SystemExit("receipt publication binding")
+    candidate_body = dict(candidate)
+    candidate_root = candidate_body.pop("candidate_root", None)
+    prepare_verification_body = dict(prepare_verification)
+    prepare_verification_root = prepare_verification_body.pop(
+        "verification_root", None
+    )
+    if (
+        candidate_root != framed_hash(
+            FINALIZE_CANDIDATE_DOMAIN, canonical(candidate_body)
+        )
+        or finalize.get("finalize_candidate") != {
+            "candidate_root": candidate_root,
+            "sha256": hashlib.sha256(candidate_raw).hexdigest(),
+        }
+        or pair.get("schema")
+        != "janus.helios-v5.synthetic-pair-verification.v1"
+        or pair.get("verdict") != "PASS_EXACT_DUAL_REPLICA_AGREEMENT"
+        or finalize.get("pair") != {
+            "pair_root": pair.get("pair_root"),
+            "prediction_root": pair.get("prediction_root"),
+            "verification_sha256": hashlib.sha256(pair_raw).hexdigest(),
+        }
+        or hashlib.sha256(prepare_verification_raw).hexdigest()
+        != prepare_verification_sha256
+        or prepare_verification.get("prepare_root") != prepare_root
+        or prepare_verification.get("commit_sha1") != commit_sha1
+        or prepare_verification.get("release_immutable") is not True
+        or prepare_verification_root != framed_hash(
+            PREPARE_VERIFICATION_DOMAIN, canonical(prepare_verification_body)
+        )
+        or candidate.get("prepare_root") != prepare_root
+        or candidate.get("commit_sha1") != commit_sha1
+        or candidate.get("challenge") != finalize.get("challenge")
+        or candidate.get("pair_root") != pair.get("pair_root")
+        or candidate.get("prediction_root") != pair.get("prediction_root")
+        or candidate.get("receipts") != {
+            "ubuntu_sha256": hashlib.sha256(ubuntu_raw).hexdigest(),
+            "windows_sha256": hashlib.sha256(windows_raw).hexdigest(),
+        }
+        or candidate.get("workflow") != {
+            "run_attempt": workflow["run_attempt"],
+            "run_id": str(workflow["id"]),
+        }
+    ):
+        raise SystemExit("published chain binding")
     check_receipt(
         ubuntu,
-        arguments.prepare_root,
-        arguments.challenge_round,
+        prepare_root,
+        challenge_round,
         "ubuntu-urllib-v1",
         "linux",
+        commit_sha1,
+        str(workflow["id"]),
+        workflow["run_attempt"],
+        "ubuntu-replica",
+        prepare_verification_sha256,
     )
     check_receipt(
         windows,
-        arguments.prepare_root,
-        arguments.challenge_round,
+        prepare_root,
+        challenge_round,
         "windows-http-client-v1",
         "windows",
+        commit_sha1,
+        str(workflow["id"]),
+        workflow["run_attempt"],
+        "windows-replica",
+        prepare_verification_sha256,
     )
     if (
         ubuntu["challenge"] != windows["challenge"]
         or ubuntu["predictions"] != windows["predictions"]
+        or ubuntu["challenge"] != finalize["challenge"]
+        or ubuntu["prediction_root"] != finalize["pair"]["prediction_root"]
+        or pair["prediction_root"] != ubuntu["prediction_root"]
     ):
         raise RuntimeError("replica disagreement")
 
-    reveal_beacon, observations = fetch_quorum(arguments.reveal_round)
+    reveal_beacon, observations = fetch_quorum(reveal_round)
     ranks = [
         (
             framed_hash(
@@ -170,12 +315,13 @@ def main() -> int:
     body = {
         "challenge": ubuntu["challenge"],
         "confusion": {"fn": fn, "fp": fp, "tn": tn, "tp": tp},
-        "finalize_root": arguments.finalize_root,
+        "finalize_root": finalize_root,
+        "finalize_verification_sha256": hashlib.sha256(verification_raw).hexdigest(),
         "labels": labels,
         "labels_root": framed_hash(LABEL_ROOT_DOMAIN, canonical(labels)),
         "outcome": "PASS" if correct >= 6 else "FAIL",
         "predictions_root": ubuntu["prediction_root"],
-        "prepare_root": arguments.prepare_root,
+        "prepare_root": prepare_root,
         "reveal_beacon": reveal_beacon,
         "reveal_relay_observations": observations,
         "rows": rows,
