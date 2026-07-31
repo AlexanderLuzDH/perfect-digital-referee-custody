@@ -27,6 +27,7 @@ PREPARE_DOMAIN = b"JANUS-HELIOS-V5-SYNTHETIC-PREPARE\0"
 VERIFICATION_DOMAIN = b"JANUS-HELIOS-V5-SYNTHETIC-PREPARE-VERIFICATION\0"
 SOURCE_PATHS = (
     ".github/workflows/helios-synthetic-replicas.yml",
+    "ceremony/ARTIFACT_DOWNLOAD_KAT.json",
     "ceremony/PROTOCOL.md",
     "ceremony/make_finalize_candidate.py",
     "ceremony/replica_ubuntu.py",

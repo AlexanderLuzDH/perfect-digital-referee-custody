@@ -147,10 +147,21 @@ def fetch_artifact_archive(artifact_id: int) -> bytes:
     if type(location) is not str:
         raise RuntimeError("artifact location missing")
     parsed = urllib.parse.urlsplit(location)
+    try:
+        parsed_port = parsed.port
+    except ValueError as exc:
+        raise RuntimeError("artifact redirect port") from exc
+    expected_netloc = parsed.hostname or ""
+    if parsed_port == 443:
+        expected_netloc += ":443"
     if (
         parsed.scheme != "https"
         or parsed.hostname is None
         or not parsed.hostname.endswith(".blob.core.windows.net")
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed_port not in (None, 443)
+        or parsed.netloc != expected_netloc
         or not parsed.path.startswith("/actions-results/")
         or not parsed.query
         or parsed.fragment
@@ -160,7 +171,9 @@ def fetch_artifact_archive(artifact_id: int) -> bytes:
         location,
         headers={"User-Agent": "helios-v5-artifact-verifier/1"},
     )
-    with urllib.request.urlopen(clean_request, timeout=20) as response:
+    with urllib.request.build_opener(NoRedirect).open(
+        clean_request, timeout=20
+    ) as response:
         if response.status != 200:
             raise RuntimeError("artifact storage status")
         raw = response.read(1048577)
