@@ -10,6 +10,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from safe_output import write_new_regular
+
 
 CHAIN_HASH = "52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971"
 SUBJECTS = tuple(f"subject-{index:02d}" for index in range(8))
@@ -178,6 +180,7 @@ def main() -> int:
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--run-attempt", required=True, type=int)
     parser.add_argument("--challenge-round", required=True, type=int)
+    parser.add_argument("--output", required=True)
     arguments = parser.parse_args()
     if (
         ROOT_RE.fullmatch(arguments.prepare_root) is None
@@ -187,6 +190,9 @@ def main() -> int:
         or not 1 <= arguments.run_attempt <= 1000
     ):
         raise SystemExit("invalid identity")
+    output = Path(arguments.output)
+    if output.parent != Path(".") or output.name != "PAIR_VERIFICATION.json":
+        raise SystemExit("invalid output")
     ubuntu, ubuntu_raw = read_receipt(Path(arguments.ubuntu))
     windows, windows_raw = read_receipt(Path(arguments.windows))
     check_receipt(
@@ -237,6 +243,12 @@ def main() -> int:
         "schema": "janus.helios-v5.synthetic-pair-verification.v1",
         "verdict": "PASS_EXACT_DUAL_REPLICA_AGREEMENT",
     }
+    write_new_regular(
+        output,
+        canonical(result) + b"\n",
+        "PAIR_VERIFICATION.json",
+        4096,
+    )
     print(canonical(result).decode("ascii"))
     return 0
 

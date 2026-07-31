@@ -22,6 +22,7 @@ from verify_pair import (
     framed_hash,
     read_receipt,
 )
+from safe_output import write_new_regular
 
 
 ROOT_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -366,7 +367,7 @@ def main() -> int:
         },
     }
     value = {**body, "reveal_root": framed_hash(REVEAL_DOMAIN, canonical(body))}
-    destination.write_bytes(canonical(value) + b"\n")
+    write_new_regular(destination, canonical(value) + b"\n", "REVEAL.json", 32768)
     print(canonical({
         "outcome": value["outcome"],
         "reveal_root": value["reveal_root"],

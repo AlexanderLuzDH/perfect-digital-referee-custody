@@ -161,7 +161,7 @@ jobs:
             --run-id "$GITHUB_RUN_ID" \
             --run-attempt "$GITHUB_RUN_ATTEMPT" \
             --challenge-round "$HELIOS_CHALLENGE_ROUND" \
-            > PAIR_VERIFICATION.json
+            --output PAIR_VERIFICATION.json
           python3 -B -S ceremony/make_finalize_candidate.py \
             --ubuntu artifacts/ubuntu/REPLICA_UBUNTU.json \
             --windows artifacts/windows/REPLICA_WINDOWS.json \

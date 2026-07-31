@@ -13,6 +13,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from safe_output import write_new_regular
+
 
 REPOSITORY = "AlexanderLuzDH/perfect-digital-referee-custody"
 CHAIN_HASH = "52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971"
@@ -29,6 +31,7 @@ SOURCE_PATHS = (
     "ceremony/make_finalize_candidate.py",
     "ceremony/replica_ubuntu.py",
     "ceremony/replica_windows.py",
+    "ceremony/safe_output.py",
     "ceremony/score_reveal.py",
     "ceremony/verify_finalize.py",
     "ceremony/verify_pair.py",
@@ -246,7 +249,12 @@ def main() -> int:
         **receipt_body,
         "verification_root": framed_hash(VERIFICATION_DOMAIN, canonical(receipt_body)),
     }
-    output.write_bytes(canonical(receipt) + b"\n")
+    write_new_regular(
+        output,
+        canonical(receipt) + b"\n",
+        "PREPARE_VERIFICATION.json",
+        8192,
+    )
     print(canonical(receipt).decode("ascii"))
     return 0
 

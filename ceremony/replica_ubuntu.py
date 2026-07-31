@@ -12,6 +12,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from safe_output import write_new_regular
+
 
 CHAIN_HASH = "52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971"
 RELAYS = (
@@ -202,7 +204,7 @@ def main() -> int:
         arguments.run_id,
         arguments.run_attempt,
     )) + b"\n"
-    output.write_bytes(raw)
+    write_new_regular(output, raw, "REPLICA_UBUNTU.json", 16384)
     return 0
 
 

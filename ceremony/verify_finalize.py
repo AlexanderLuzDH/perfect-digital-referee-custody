@@ -16,6 +16,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from safe_output import write_new_regular
+
 
 REPOSITORY = "AlexanderLuzDH/perfect-digital-referee-custody"
 GENESIS_TIME = 1692803367
@@ -430,7 +432,12 @@ def main() -> int:
             VERIFICATION_DOMAIN, canonical(verification_body)
         ),
     }
-    output.write_bytes(canonical(verification) + b"\n")
+    write_new_regular(
+        output,
+        canonical(verification) + b"\n",
+        "FINALIZE_VERIFICATION.json",
+        8192,
+    )
     print(canonical(verification).decode("ascii"))
     return 0
 

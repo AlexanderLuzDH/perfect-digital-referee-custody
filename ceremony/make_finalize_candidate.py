@@ -17,6 +17,7 @@ from verify_pair import (
     framed_hash,
     read_receipt,
 )
+from safe_output import write_new_regular
 
 
 ROOT_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -140,7 +141,12 @@ def main() -> int:
         },
     }
     value = {**body, "candidate_root": framed_hash(DOMAIN, canonical(body))}
-    output.write_bytes(canonical(value) + b"\n")
+    write_new_regular(
+        output,
+        canonical(value) + b"\n",
+        "FINALIZE_CANDIDATE.json",
+        16384,
+    )
     print(canonical(value).decode("ascii"))
     return 0
 

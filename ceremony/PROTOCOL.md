@@ -43,6 +43,10 @@ IDs and no target, checkpoint, archive, model, or real labels.
 7. `REVEAL.json` is published as a third immutable release and the complete
    local evidence tree is frozen and independently reviewed.
 
+Every generated file uses atomic exclusive creation in the current ceremony
+directory. Existing files, links, reparse paths, non-regular destinations, and
+post-open identity changes cause denial; no output is overwritten.
+
 ## Authority boundaries
 
 Only a completed transcript that passes the external release-time and

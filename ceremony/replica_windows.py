@@ -11,6 +11,8 @@ import re
 import time
 from pathlib import Path
 
+from safe_output import write_new_regular
+
 
 CHAIN = "52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971"
 HOSTS = ("api.drand.sh", "api2.drand.sh", "api3.drand.sh")
@@ -190,14 +192,15 @@ def main():
         )
     ):
         raise SystemExit("invalid prepare verification")
-    destination.write_bytes(encode_json(construct(
+    raw = encode_json(construct(
         options.prepare_root,
         options.challenge_round,
         hashlib.sha256(verification_raw).hexdigest(),
         options.commit,
         options.run_id,
         options.run_attempt,
-    )) + b"\n")
+    )) + b"\n"
+    write_new_regular(destination, raw, "REPLICA_WINDOWS.json", 16384)
     return 0
 
 
